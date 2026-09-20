@@ -1,0 +1,15 @@
+# Install torch FIRST from the CUDA index, then this file.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+#
+# Installing torch from PyPI on Windows gives the CPU-only build, which cannot
+# run this pipeline. See README.md.
+
+torch>=2.2
+torchvision>=0.17
+diffusers>=0.27
+transformers>=4.38
+accelerate>=0.27
+safetensors>=0.4
+huggingface_hub>=0.21
+pillow>=10.0

@@ -1,0 +1,6 @@
+output/
+*.zip
+.venv/
+__pycache__/
+*.pyc
+prompts.txt
