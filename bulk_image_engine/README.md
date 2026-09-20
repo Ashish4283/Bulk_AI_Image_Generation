@@ -10,51 +10,72 @@ writes nothing outside, this directory.
 
 ---
 
-## Quick check (5 prompts)
+## How the output is organised
+
+Every batch renders **all** the prompts with a different seed, so each batch
+is a fresh set of variations. Folders are numbered independently:
+
+```
+output/
+  batch_1/     1.jpg .. 700.jpg   + manifest.jsonl
+  batch_2/     1.jpg .. 700.jpg   + manifest.jsonl
+  …
+  batch_15/    1.jpg .. 700.jpg
+  batch_1.zip  batch_2.zip  …  batch_15.zip
+  all_batches.zip                 (with --bundle)
+```
+
+700 prompts × 15 batches = **10,500 images**. `12.jpg` is prompt 12 in every
+folder, so a folder can be shipped, reviewed or regenerated on its own.
+
+## Test mode (10 prompts × 3 batches = 30 images)
 
 ```bash
 python run_test.py            # add --offload on a low-VRAM GPU
 ```
 
-Renders the 5 sample prompts, verifies `1.jpg`..`5.jpg` decode, and writes
-`output/test_batch.zip`. Exits non-zero if anything is missing or corrupt.
+Same shape as production, small enough to verify in minutes. It checks that
+each folder holds exactly `1.jpg`..`10.jpg` and they decode, that the same
+prompt really differs between batches, that each zip holds its 10 images in
+order, and that `all_batches.zip` holds all three archives. Non-zero exit on
+any failure.
 
-## Full runs
+## Production runs
 
 ```bash
-# one batch of 700
-python engine.py --prompts prompts.txt --batch 1
+# all 15 batches of 700, zipped, plus one shipping archive
+python engine.py --prompts prompts.txt --all --batches 15 --bundle
 
-# every batch in the file, back to back
-python engine.py --prompts prompts.txt --all --batch-size 700
+# a single batch
+python engine.py --prompts prompts.txt --batch 3
 
 # resume after an interruption — same command, finished images are skipped
-python engine.py --prompts prompts.txt --batch 1
+python engine.py --prompts prompts.txt --batch 3
 ```
 
 | Flag | Purpose |
 |---|---|
 | `--prompts` | Input file (default `sample_prompts.txt`) |
+| `--mode` | `variants` (default) or `split` |
 | `--batch N` | Render 1-based batch N |
-| `--batch-size` | Prompts per batch (default 700) |
+| `--batches N` | How many batches `--all` runs (default 15) |
 | `--all` | Every batch in order |
+| `--bundle` | Also write `all_batches.zip` |
 | `--offload` | CPU offload for low-VRAM GPUs |
 | `--size` | Square edge in px (default 1024) |
 | `--quality` | JPEG quality (default 95) |
 | `--renumber` | Close gaps left by blank lines |
 | `--no-resume` | Re-render images that already exist |
 | `--no-zip` | Skip packaging |
+| `--batch-size` | `split` mode only: prompts per batch |
 
-Output layout:
+**`split` mode** is the alternative shape: one long prompt file divided across
+batches so each prompt renders once, with numbering continuing across folders
+(`batch_2` starts at `701.jpg`). Use it if the client supplies 10,000 distinct
+prompts rather than 700 to vary.
 
-```
-output/
-  batch_1/            1.jpg, 2.jpg, …, manifest.jsonl
-  batch_1.zip
-```
-
-`manifest.jsonl` records index, source line, seed and render time per image —
-so any image can be traced back to its prompt and reproduced exactly.
+`manifest.jsonl` records index, source line, batch, seed and render time per
+image — so any image traces back to its prompt and can be reproduced exactly.
 
 ---
 
@@ -130,8 +151,12 @@ so an interrupted run never ships a corrupt file. Images are written to
 `.jpg.part` and atomically renamed, so a partial write cannot be mistaken for
 a finished image.
 
-**Reproducibility.** Seed = `1_000_000 + index`, so re-running any index
-reproduces the same image on the same GPU and library versions.
+**Reproducibility.** Seed = `1_000_000 + (batch - 1) × 1_000_000 + index`.
+The same prompt gets a different seed in every batch, so batch 2 is a genuine
+variation rather than a duplicate, while re-running any single image
+reproduces it exactly on the same GPU and library versions. The stride is far
+larger than any realistic prompt count, so seed ranges never overlap between
+batches.
 
 **Scheduler.** SDXL-Lightning needs
 `EulerDiscreteScheduler(timestep_spacing="trailing")` with

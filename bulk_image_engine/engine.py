@@ -39,7 +39,19 @@ NUM_INFERENCE_STEPS = 4
 GUIDANCE_SCALE = 0.0
 DEFAULT_SIZE = 1024
 DEFAULT_BATCH_SIZE = 700
-BASE_SEED = 1_000_000  # per-image seed = BASE_SEED + index, so reruns match
+DEFAULT_BATCHES = 15          # 15 x 700 = 10,500 images
+
+# Per-image seed = BASE_SEED + (batch - 1) * SEED_STRIDE + index.
+# Every image is reproducible, and the same prompt gets a different seed in
+# each batch, so batch 2 is a genuine variation rather than a duplicate.
+# The stride exceeds any realistic prompt count, so seed ranges never collide.
+BASE_SEED = 1_000_000
+SEED_STRIDE = 1_000_000
+
+
+def seed_for(batch_no: int, index: int) -> int:
+    """Deterministic seed for one image of one batch."""
+    return BASE_SEED + (batch_no - 1) * SEED_STRIDE + index
 
 
 # --------------------------------------------------------------------------
@@ -233,6 +245,7 @@ class BulkImageEngine:
         prompts: list[Prompt],
         out_dir: Path,
         resume: bool = True,
+        batch_no: int = 1,
     ) -> dict:
         """Render every prompt into out_dir as <index>.jpg. Returns a summary."""
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -252,7 +265,7 @@ class BulkImageEngine:
                     print(f"[{position}/{total}] Skipped (exists): {target.name}")
                     continue
 
-                seed = BASE_SEED + p.index
+                seed = seed_for(batch_no, p.index)
                 snippet = p.text[:60] + ("..." if len(p.text) > 60 else "")
                 t0 = time.time()
                 try:
@@ -268,8 +281,8 @@ class BulkImageEngine:
                     rendered += 1
                     print(f'[{position}/{total}] Rendered: "{snippet}" - {elapsed:.1f}s')
                     manifest.write(json.dumps({
-                        **asdict(p), "file": target.name, "seed": seed,
-                        "seconds": round(elapsed, 2),
+                        **asdict(p), "batch": batch_no, "file": target.name,
+                        "seed": seed, "seconds": round(elapsed, 2),
                     }) + "\n")
                     manifest.flush()
                 except KeyboardInterrupt:
@@ -313,20 +326,41 @@ def zip_batch(out_dir: Path, zip_path: Path, expected: list[Prompt]) -> dict:
 # CLI
 # --------------------------------------------------------------------------
 
-def _batches_to_run(args, prompts) -> Iterator[int]:
-    if args.all:
-        yield from range(1, batch_count(prompts, args.batch_size) + 1)
-    else:
-        yield args.batch
+def bundle_zips(zip_paths: list[Path], bundle_path: Path) -> dict:
+    """Wrap the per-batch archives in one shipping archive (stored, not re-deflated)."""
+    with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_STORED) as zf:
+        for z in zip_paths:
+            zf.write(z, arcname=z.name)
+    return {
+        "zip": str(bundle_path), "count": len(zip_paths),
+        "size_mb": round(bundle_path.stat().st_size / 1_048_576, 1),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     here = Path(__file__).resolve().parent
-    ap = argparse.ArgumentParser(description="Bulk SDXL-Lightning image generation")
+    ap = argparse.ArgumentParser(
+        description="Bulk SDXL-Lightning image generation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+modes
+  variants (default)  Every batch renders ALL prompts with a different seed.
+                      700 prompts x 15 batches = 10,500 images. Each folder is
+                      numbered 1..700 independently:
+                          output/batch_1/1.jpg .. 700.jpg   -> batch_1.zip
+                          output/batch_2/1.jpg .. 700.jpg   -> batch_2.zip
+  split               One long prompt file is divided across batches, so each
+                      prompt is rendered once. Numbering continues across
+                      folders (batch_2 starts at 701.jpg).
+""")
     ap.add_argument("--prompts", type=Path, default=here / "sample_prompts.txt")
     ap.add_argument("--out", type=Path, default=here / "output")
+    ap.add_argument("--mode", choices=("variants", "split"), default="variants")
     ap.add_argument("--batch", type=int, default=1, help="1-based batch number")
-    ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    ap.add_argument("--batches", type=int, default=DEFAULT_BATCHES,
+                    help=f"variants mode: how many batches with --all (default {DEFAULT_BATCHES})")
+    ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                    help="split mode: prompts per batch")
     ap.add_argument("--all", action="store_true", help="run every batch in order")
     ap.add_argument("--offload", action="store_true", help="low-VRAM CPU offload")
     ap.add_argument("--size", type=int, default=DEFAULT_SIZE)
@@ -335,18 +369,36 @@ def main(argv: list[str] | None = None) -> int:
                     help="close gaps from blank lines (default: image number = line number)")
     ap.add_argument("--no-resume", action="store_true", help="re-render existing images")
     ap.add_argument("--no-zip", action="store_true")
+    ap.add_argument("--bundle", action="store_true",
+                    help="also wrap every batch zip into one shipping archive")
     args = ap.parse_args(argv)
 
     prompts = load_prompts(args.prompts, renumber=args.renumber)
-    n_batches = batch_count(prompts, args.batch_size)
-    print(f"[load] {len(prompts)} prompts from {args.prompts.name} "
-          f"-> {n_batches} batch(es) of up to {args.batch_size}")
 
+    if args.mode == "variants":
+        n_batches = args.batches
+        print(f"[load] {len(prompts)} prompts from {args.prompts.name} | mode=variants "
+              f"-> {n_batches} batch(es) x {len(prompts)} = "
+              f"{n_batches * len(prompts)} images")
+    else:
+        n_batches = batch_count(prompts, args.batch_size)
+        print(f"[load] {len(prompts)} prompts from {args.prompts.name} | mode=split "
+              f"-> {n_batches} batch(es) of up to {args.batch_size}")
+
+    todo = range(1, n_batches + 1) if args.all else [args.batch]
     engine = BulkImageEngine(offload=args.offload, size=args.size, quality=args.quality)
     exit_code = 0
+    made_zips: list[Path] = []
 
-    for batch_no in _batches_to_run(args, prompts):
-        subset = batch_slice(prompts, batch_no, args.batch_size)
+    for batch_no in todo:
+        if batch_no < 1 or batch_no > n_batches:
+            print(f"[batch {batch_no}] outside 1..{n_batches} - skipped")
+            continue
+
+        # variants: the whole prompt list, a fresh seed per batch.
+        # split:    this batch's slice of the prompt list.
+        subset = prompts if args.mode == "variants" else batch_slice(
+            prompts, batch_no, args.batch_size)
         if not subset:
             print(f"[batch {batch_no}] no prompts in range - nothing to do")
             continue
@@ -355,7 +407,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n=== batch {batch_no}/{n_batches}: {len(subset)} prompts "
               f"({subset[0].index}..{subset[-1].index}) -> {out_dir} ===")
 
-        summary = engine.run_batch(subset, out_dir, resume=not args.no_resume)
+        summary = engine.run_batch(subset, out_dir,
+                                   resume=not args.no_resume, batch_no=batch_no)
         print(f"[batch {batch_no}] rendered={summary['rendered']} "
               f"skipped={summary['skipped']} failed={summary['failed']} "
               f"in {summary['seconds']}s")
@@ -364,12 +417,18 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 1
 
         if not args.no_zip:
-            result = zip_batch(out_dir, args.out / f"batch_{batch_no}.zip", subset)
+            zip_path = args.out / f"batch_{batch_no}.zip"
+            result = zip_batch(out_dir, zip_path, subset)
+            made_zips.append(zip_path)
             print(f"[batch {batch_no}] {result['zip']} "
                   f"({result['count']} images, {result['size_mb']} MB)")
             if result["missing"]:
                 print(f"[batch {batch_no}] WARNING missing indices: {result['missing']}")
                 exit_code = 1
+
+    if args.bundle and made_zips:
+        b = bundle_zips(made_zips, args.out / "all_batches.zip")
+        print(f"\n[bundle] {b['zip']} ({b['count']} archives, {b['size_mb']} MB)")
 
     return exit_code
 
