@@ -225,18 +225,29 @@ class BulkImageEngine:
                 "  - cloud:   run on a GPU instance (g5.xlarge / RTX 4090)"
             )
 
-        device = "cuda"
         dtype = torch.float16
-        print(f"[init] GPU: {torch.cuda.get_device_name(0)}")
-        print(f"[init] loading UNet from {self.lightning_repo}")
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        print(f"[init] GPU: {torch.cuda.get_device_name(0)} ({vram_gb:.1f} GB)")
+
+        if vram_gb < 6 and not self.offload:
+            print("[init] WARNING: under 6 GB of VRAM and offload is off - "
+                  "expect out-of-memory. Rerun with --offload.")
+
+        # In offload mode the UNet must be built and filled on the CPU.
+        # Moving it to CUDA here would consume nearly all VRAM on a small
+        # card before enable_model_cpu_offload() ever gets a chance to manage
+        # placement, and the VAE and text encoders would then have nowhere to
+        # go. accelerate streams the layers in as they are needed instead.
+        load_device = "cpu" if self.offload else "cuda"
+        print(f"[init] loading UNet from {self.lightning_repo} onto {load_device}")
 
         unet = UNet2DConditionModel.from_config(
             self.base_model, subfolder="unet"
-        ).to(device, dtype)
+        ).to(load_device, dtype)
         unet.load_state_dict(
             load_file(
                 hf_hub_download(self.lightning_repo, self.lightning_ckpt),
-                device=device,
+                device=load_device,
             )
         )
 
@@ -252,15 +263,23 @@ class BulkImageEngine:
         )
 
         pipe.set_progress_bar_config(disable=True)
-        pipe.enable_attention_slicing()
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing()
 
         if self.offload:
-            # Keeps peak VRAM low enough for an 8 GB card such as an RTX 3050.
-            # Do not also call .to("cuda") — offload manages placement itself.
+            # Keeps peak VRAM low enough for a 4 GB card such as an RTX 3050
+            # Laptop GPU. Do not also call .to("cuda") — offload owns placement.
             pipe.enable_model_cpu_offload()
+            # VAE decode is the peak-memory step at 1024px; slicing it trades
+            # a little speed for a large drop in peak VRAM. The call moved
+            # from the pipeline to the VAE in diffusers 0.40, so support both.
+            if hasattr(pipe, "enable_vae_slicing"):
+                pipe.enable_vae_slicing()
+            elif hasattr(getattr(pipe, "vae", None), "enable_slicing"):
+                pipe.vae.enable_slicing()
             print("[init] model CPU offload ON (low-VRAM mode, slower)")
         else:
-            pipe.to(device)
+            pipe.to("cuda")
 
         self._pipe = pipe
         print("[init] ready")
