@@ -18,6 +18,7 @@ CLI
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -66,9 +67,45 @@ class Prompt:
     text: str
 
 
+PROMPT_COLUMNS = ("prompt", "prompts", "text", "description", "caption")
+
+
+def _rows_from_csv(path: Path) -> list[tuple[int, str]]:
+    """
+    Yield (row_number, prompt) from a CSV.
+
+    Accepts a bare one-column file, or one with a header. If a header names a
+    prompt column it is used; otherwise the first column is. Extra columns
+    (id, notes, ...) are ignored, so a client's spreadsheet export works
+    without editing.
+    """
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.reader(fh))
+    if not rows:
+        return []
+
+    col = 0
+    start = 0
+    header = [c.strip().lower() for c in rows[0]]
+    named = [i for i, h in enumerate(header) if h in PROMPT_COLUMNS]
+    if named:
+        col, start = named[0], 1
+    elif len(header) > 1 and not any(len(c.strip()) > 40 for c in rows[0]):
+        # Several short fields in row 1 and no recognised name: most likely a
+        # header we don't know. A real prompt is rarely this short.
+        start = 1
+
+    # Number DATA rows from 1, so a header row does not push the first image
+    # to 2.jpg. Blank data rows still leave a gap, exactly as in a .txt file.
+    out: list[tuple[int, str]] = []
+    for offset, row in enumerate(rows[start:], start=1):
+        out.append((offset, row[col] if col < len(row) else ""))
+    return out
+
+
 def load_prompts(path: Path, renumber: bool = False) -> list[Prompt]:
     """
-    Read prompts, one per line.
+    Read prompts from a .txt (one per line) or .csv file.
 
     Blank lines and stray carriage returns (CRLF files authored on Windows)
     never break the mapping between a prompt and its image number.
@@ -82,12 +119,15 @@ def load_prompts(path: Path, renumber: bool = False) -> list[Prompt]:
     if not path.is_file():
         raise FileNotFoundError(f"Prompt file not found: {path}")
 
-    # newline="" keeps \r visible so we can strip it rather than embed it.
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        raw_lines = fh.read().splitlines()
+    if path.suffix.lower() == ".csv":
+        raw_rows = _rows_from_csv(path)
+    else:
+        # newline="" keeps \r visible so we can strip it rather than embed it.
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            raw_rows = list(enumerate(fh.read().splitlines(), start=1))
 
     prompts: list[Prompt] = []
-    for line_no, raw in enumerate(raw_lines, start=1):
+    for line_no, raw in raw_rows:
         text = raw.replace("\r", "").replace(" ", " ").strip()
         if not text:
             continue
@@ -246,19 +286,39 @@ class BulkImageEngine:
         out_dir: Path,
         resume: bool = True,
         batch_no: int = 1,
+        stop_file: Path | None = None,
+        stop_after: int | None = None,
     ) -> dict:
-        """Render every prompt into out_dir as <index>.jpg. Returns a summary."""
+        """
+        Render every prompt into out_dir as <index>.jpg. Returns a summary.
+
+        Stopping is always safe. The run halts only between images, never
+        mid-write, so the next run resumes from exactly where it stopped:
+          * create the stop file (default STOP) to halt cleanly
+          * or press Ctrl+C
+          * or set stop_after to cap how many images this run renders
+        """
         out_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = out_dir / "manifest.jsonl"
 
         total = len(prompts)
         rendered = skipped = failed = 0
         failures: list[dict] = []
+        stopped: str | None = None
         t_start = time.time()
 
         with manifest_path.open("a", encoding="utf-8") as manifest:
             for position, p in enumerate(prompts, start=1):
                 target = out_dir / f"{p.index}.jpg"
+
+                if stop_file is not None and stop_file.exists():
+                    stopped = f"stop file {stop_file.name} present"
+                    print(f"\n[stop] {stopped} - halting cleanly at {position}/{total}")
+                    break
+                if stop_after is not None and rendered >= stop_after:
+                    stopped = f"reached --stop-after {stop_after}"
+                    print(f"\n[stop] {stopped} - halting at {position}/{total}")
+                    break
 
                 if resume and is_valid_image(target):
                     skipped += 1
@@ -286,8 +346,11 @@ class BulkImageEngine:
                     }) + "\n")
                     manifest.flush()
                 except KeyboardInterrupt:
-                    print("\n[abort] interrupted - rerun the same command to resume")
-                    raise
+                    # The partial file was never renamed into place, so nothing
+                    # corrupt is left behind and the next run redoes this index.
+                    stopped = "interrupted with Ctrl+C"
+                    print(f"\n[stop] {stopped} at {position}/{total}")
+                    break
                 except Exception as exc:                     # noqa: BLE001
                     failed += 1
                     failures.append({"index": p.index, "error": str(exc)})
@@ -295,7 +358,7 @@ class BulkImageEngine:
 
         return {
             "total": total, "rendered": rendered, "skipped": skipped,
-            "failed": failed, "failures": failures,
+            "failed": failed, "failures": failures, "stopped": stopped,
             "seconds": round(time.time() - t_start, 1),
         }
 
@@ -371,7 +434,16 @@ modes
     ap.add_argument("--no-zip", action="store_true")
     ap.add_argument("--bundle", action="store_true",
                     help="also wrap every batch zip into one shipping archive")
+    ap.add_argument("--stop-file", type=Path, default=here / "STOP",
+                    help="create this file to stop cleanly between images")
+    ap.add_argument("--stop-after", type=int, default=None,
+                    help="render at most N images this run, then stop")
     args = ap.parse_args(argv)
+
+    # A stop file left over from a previous run would halt this one instantly.
+    if args.stop_file.exists():
+        print(f"[start] clearing old stop file {args.stop_file}")
+        args.stop_file.unlink()
 
     prompts = load_prompts(args.prompts, renumber=args.renumber)
 
@@ -407,8 +479,10 @@ modes
         print(f"\n=== batch {batch_no}/{n_batches}: {len(subset)} prompts "
               f"({subset[0].index}..{subset[-1].index}) -> {out_dir} ===")
 
-        summary = engine.run_batch(subset, out_dir,
-                                   resume=not args.no_resume, batch_no=batch_no)
+        summary = engine.run_batch(
+            subset, out_dir, resume=not args.no_resume, batch_no=batch_no,
+            stop_file=args.stop_file, stop_after=args.stop_after,
+        )
         print(f"[batch {batch_no}] rendered={summary['rendered']} "
               f"skipped={summary['skipped']} failed={summary['failed']} "
               f"in {summary['seconds']}s")
@@ -423,8 +497,14 @@ modes
             print(f"[batch {batch_no}] {result['zip']} "
                   f"({result['count']} images, {result['size_mb']} MB)")
             if result["missing"]:
-                print(f"[batch {batch_no}] WARNING missing indices: {result['missing']}")
-                exit_code = 1
+                print(f"[batch {batch_no}] incomplete, missing indices: {result['missing']}")
+                if not summary["stopped"]:
+                    exit_code = 1
+
+        if summary["stopped"]:
+            print(f"\n[stopped] {summary['stopped']}")
+            print("[stopped] progress is saved - rerun the SAME command to resume")
+            return 2
 
     if args.bundle and made_zips:
         b = bundle_zips(made_zips, args.out / "all_batches.zip")

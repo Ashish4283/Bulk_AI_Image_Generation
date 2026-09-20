@@ -28,6 +28,51 @@ output/
 700 prompts × 15 batches = **10,500 images**. `12.jpg` is prompt 12 in every
 folder, so a folder can be shipped, reviewed or regenerated on its own.
 
+## Input file
+
+Either a **`.txt`** with one prompt per line, or a **`.csv`**:
+
+```csv
+id,prompt
+1,"A cinematic wide shot of an astronaut walking on Mars, photorealistic 8k"
+2,"A cozy rustic cabin in the snowy Alps at golden hour, warm window light"
+```
+
+The CSV may have a header or not, and may carry extra columns (`id`, notes,
+whatever) — a column named `prompt`/`text`/`description`/`caption` is used if
+present, otherwise the first column. A client's spreadsheet export works
+without editing. Data rows are numbered from 1, so a header row does not push
+the first image to `2.jpg`.
+
+`sample_prompts.csv` (10 prompts) and `sample_prompts.txt` are both included.
+
+## Stopping and resuming
+
+A run can be stopped at any time without losing or corrupting work. Images
+are written to a temporary name and renamed only once complete, so a stop
+never leaves a half-written file.
+
+```bash
+# stop cleanly - finishes the current image, then exits
+touch STOP            # Windows: New-Item STOP
+
+# or press Ctrl+C
+
+# cap this run, e.g. to test on a metered GPU
+python engine.py --prompts prompts.csv --stop-after 20
+
+# resume - the SAME command; finished images are skipped
+python engine.py --prompts prompts.csv --all
+```
+
+A stopped run exits with code **2** (distinct from failure, which is 1). Any
+leftover `STOP` file is cleared automatically at startup, so a forgotten one
+cannot silently halt the next run.
+
+Resume verifies each existing image by **decoding** it, not merely checking
+that the file exists, so a truncated image from a killed process is
+re-rendered rather than shipped.
+
 ## Test mode (10 prompts × 3 batches = 30 images)
 
 ```bash
@@ -67,6 +112,8 @@ python engine.py --prompts prompts.txt --batch 3
 | `--renumber` | Close gaps left by blank lines |
 | `--no-resume` | Re-render images that already exist |
 | `--no-zip` | Skip packaging |
+| `--stop-file` | Path whose existence stops the run (default `STOP`) |
+| `--stop-after N` | Render at most N images this run |
 | `--batch-size` | `split` mode only: prompts per batch |
 
 **`split` mode** is the alternative shape: one long prompt file divided across
@@ -121,6 +168,25 @@ tmux new -s render
 
 First run downloads ~7 GB of weights to `~/.cache/huggingface`. Put that cache
 on the instance's own NVMe, not an EBS root volume, if you rebuild often.
+
+### Stopping the GPU instance (this is what costs money)
+
+The engine stopping is free; the **instance** is what bills, at roughly
+$1/hour whether or not it is rendering. Stop it whenever you pause:
+
+```bash
+aws ec2 stop-instances     --instance-ids i-xxxxxxxx --profile ashish-admin
+aws ec2 start-instances    --instance-ids i-xxxxxxxx --profile ashish-admin
+aws ec2 describe-instances --instance-ids i-xxxxxxxx --profile ashish-admin \
+    --query "Reservations[].Instances[].State.Name" --output text
+```
+
+**Stop** keeps the disk and your downloaded weights, and bills only for EBS
+storage (pennies per day). **Terminate** deletes everything, including the
+7 GB model cache.
+
+Safe sequence for pausing work: create `STOP`, wait for the run to exit, then
+stop the instance. On restart, rerun the same command and it resumes.
 
 ---
 
