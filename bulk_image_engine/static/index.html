@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulk Image Engine</title>
+<style>
+:root{
+  --bg:#12141a; --panel:#1a1d26; --panel2:#222634; --line:#2c3142;
+  --ink:#e8ebf2; --ink2:#a6adbf; --ink3:#6f7789;
+  --accent:#5b8cff; --ok:#3fb27f; --warn:#d9a441; --err:#e0685f;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:22px 18px 60px}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  padding-bottom:16px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:21px;letter-spacing:-.01em}
+.sub{color:var(--ink3);font-size:13px}
+.pill{margin-left:auto;font:12px var(--mono);padding:5px 11px;border-radius:99px;
+  background:var(--panel2);color:var(--ink2);border:1px solid var(--line)}
+.pill.on{background:rgba(63,178,127,.14);color:var(--ok);border-color:rgba(63,178,127,.4)}
+.pill.stopping{background:rgba(217,164,65,.14);color:var(--warn);border-color:rgba(217,164,65,.4)}
+
+.grid{display:grid;grid-template-columns:320px 1fr;gap:18px;margin-top:20px}
+@media (max-width:860px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h2{margin:0 0 13px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3)}
+
+label{display:block;font-size:12px;color:var(--ink2);margin:11px 0 5px}
+select,input[type=number],input[type=text]{width:100%;padding:8px 10px;border-radius:7px;
+  background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:14px}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.check{display:flex;align-items:center;gap:9px;margin-top:12px;font-size:13px;color:var(--ink2)}
+.check input{width:16px;height:16px;accent-color:var(--accent)}
+
+.btns{display:flex;gap:9px;margin-top:17px}
+button{flex:1;padding:11px;border:0;border-radius:8px;font-size:14px;font-weight:600;
+  cursor:pointer;transition:filter .15s}
+button:hover:not(:disabled){filter:brightness(1.12)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.start{background:var(--accent);color:#fff}
+.stop{background:var(--panel2);color:var(--err);border:1px solid rgba(224,104,95,.45)}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:14px}
+.stat{background:var(--panel2);border-radius:8px;padding:10px 12px}
+.stat b{display:block;font:600 19px/1.2 var(--mono);font-variant-numeric:tabular-nums}
+.stat span{font-size:10.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.06em}
+.stat.err b{color:var(--err)}
+
+.bar{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden;margin-bottom:6px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .3s;border-radius:99px}
+.barlabel{display:flex;justify-content:space-between;font:12px var(--mono);
+  color:var(--ink3);margin-bottom:16px}
+
+pre.log{margin:0;background:#0d0f14;border:1px solid var(--line);border-radius:8px;
+  padding:12px;height:260px;overflow:auto;font:12px/1.65 var(--mono);color:var(--ink2);
+  white-space:pre-wrap;word-break:break-word}
+.log .r{color:var(--ok)}.log .f{color:var(--err)}.log .b{color:var(--accent)}
+
+.gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:9px;margin-top:6px}
+.gal figure{margin:0;background:var(--panel2);border-radius:7px;overflow:hidden}
+.gal img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
+.gal figcaption{font:10.5px var(--mono);color:var(--ink3);padding:5px 7px;text-align:center}
+.empty{color:var(--ink3);font-size:13px;padding:14px 0}
+
+.zips{display:flex;flex-direction:column;gap:7px}
+.zips a{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:9px 12px;background:var(--panel2);border-radius:7px;color:var(--ink);
+  text-decoration:none;font-size:13px;border:1px solid transparent}
+.zips a:hover{border-color:var(--accent)}
+.zips em{font:11.5px var(--mono);color:var(--ink3);font-style:normal}
+.err{color:var(--err);font-size:13px;margin-top:10px;min-height:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Bulk Image Engine</h1>
+    <span class="sub">SDXL-Lightning · 4-step</span>
+    <span class="pill" id="pill">idle</span>
+  </header>
+
+  <div class="grid">
+
+    <!-- controls -->
+    <section class="card">
+      <h2>Run</h2>
+
+      <label for="prompts">Prompt file</label>
+      <select id="prompts"></select>
+
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="variants">variants — every batch renders all prompts</option>
+        <option value="split">split — divide prompts across batches</option>
+      </select>
+
+      <div class="row">
+        <div>
+          <label for="batches">Batches</label>
+          <input type="number" id="batches" value="3" min="1" max="100">
+        </div>
+        <div>
+          <label for="size">Size (px)</label>
+          <select id="size">
+            <option>1024</option><option>768</option><option>512</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="stopAfter">Stop after N images <span style="color:var(--ink3)">(blank = all)</span></label>
+      <input type="number" id="stopAfter" min="1" placeholder="all">
+
+      <div class="check">
+        <input type="checkbox" id="offload">
+        <label for="offload" style="margin:0">Low-VRAM mode (CPU offload)</label>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="bundle" checked>
+        <label for="bundle" style="margin:0">Bundle all zips for shipping</label>
+      </div>
+
+      <div class="btns">
+        <button class="start" id="btnStart">Start</button>
+        <button class="stop" id="btnStop" disabled>Stop</button>
+      </div>
+      <div class="err" id="err"></div>
+    </section>
+
+    <!-- progress -->
+    <section class="card">
+      <h2>Progress</h2>
+
+      <div class="stats">
+        <div class="stat"><b id="sBatch">–</b><span>Batch</span></div>
+        <div class="stat"><b id="sDone">0</b><span>Images</span></div>
+        <div class="stat"><b id="sRate">–</b><span>Per image</span></div>
+        <div class="stat err"><b id="sFail">0</b><span>Failed</span></div>
+      </div>
+
+      <div class="bar"><i id="bar"></i></div>
+      <div class="barlabel"><span id="pct">0%</span><span id="eta"></span></div>
+
+      <pre class="log" id="log">Ready. Choose a prompt file and press Start.</pre>
+    </section>
+  </div>
+
+  <div class="grid" style="margin-top:18px">
+    <section class="card">
+      <h2>Downloads</h2>
+      <div class="zips" id="zips"><div class="empty">No archives yet.</div></div>
+    </section>
+    <section class="card">
+      <h2>Latest images</h2>
+      <div class="gal" id="gal"></div>
+      <div class="empty" id="galEmpty">Nothing rendered yet.</div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (p, o) => {
+  const r = await fetch(p, o);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+};
+const fmt = s => s == null ? '' :
+  s >= 3600 ? `${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`
+: s >= 60   ? `${Math.floor(s/60)}m ${Math.round(s%60)}s`
+:             `${Math.round(s)}s`;
+
+api('/api/prompt-files').then(d => {
+  $('prompts').innerHTML = d.files.map(f => `<option>${f}</option>`).join('')
+    || '<option value="">no .txt or .csv found</option>';
+});
+
+$('btnStart').onclick = async () => {
+  $('err').textContent = '';
+  const sa = $('stopAfter').value;
+  try {
+    await api('/api/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prompts: $('prompts').value, mode: $('mode').value,
+        batches: +$('batches').value, size: +$('size').value,
+        offload: $('offload').checked, bundle: $('bundle').checked,
+        stop_after: sa ? +sa : null
+      })
+    });
+  } catch (e) { $('err').textContent = e.message; }
+};
+
+$('btnStop').onclick = async () => {
+  try { await api('/api/stop', {method: 'POST'}); }
+  catch (e) { $('err').textContent = e.message; }
+};
+
+const colour = l =>
+    /Rendered/.test(l) ? `<span class="r">${l}</span>`
+  : /FAILED|Error|error/.test(l) ? `<span class="f">${l}</span>`
+  : /^===|^\[batch|^\[stop|^\$/.test(l) ? `<span class="b">${l}</span>`
+  : l;
+
+let lastGallery = 0;
+
+async function tick() {
+  let s;
+  try { s = await api('/api/status'); } catch { return; }
+
+  const pill = $('pill');
+  pill.className = 'pill' + (s.running ? (s.stopping ? ' stopping' : ' on') : '');
+  pill.textContent = s.running ? (s.stopping ? 'stopping…' : 'running')
+                   : s.exit_code === 2 ? 'stopped'
+                   : s.exit_code === 0 ? 'complete'
+                   : s.exit_code == null ? 'idle' : `exit ${s.exit_code}`;
+
+  $('btnStart').disabled = s.running;
+  $('btnStop').disabled = !s.running || s.stopping;
+
+  $('sBatch').textContent = s.batches ? `${s.batch}/${s.batches}` : '–';
+  $('sDone').textContent = s.rendered;
+  $('sRate').textContent = s.per_image ? `${s.per_image}s` : '–';
+  $('sFail').textContent = s.failed;
+
+  const pct = s.total ? (s.done / s.total * 100) : 0;
+  $('bar').style.width = pct + '%';
+  $('pct').textContent = s.total ? `${s.done} / ${s.total} · ${pct.toFixed(0)}%` : '0%';
+  $('eta').textContent = s.running && s.eta ? `about ${fmt(s.eta)} left`
+                       : s.elapsed ? `elapsed ${fmt(s.elapsed)}` : '';
+
+  if (s.log?.length) {
+    const el = $('log');
+    const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    el.innerHTML = s.log.map(colour).join('\n');
+    if (stick) el.scrollTop = el.scrollHeight;
+  }
+
+  if (Date.now() - lastGallery > 3000) {
+    lastGallery = Date.now();
+    const g = await api('/api/gallery').catch(() => null);
+    if (g) {
+      $('galEmpty').style.display = g.images.length ? 'none' : '';
+      $('gal').innerHTML = g.images.map(p => `
+        <figure><img src="/api/thumb/${p}?t=${lastGallery}" alt="${p}" loading="lazy">
+        <figcaption>${p}</figcaption></figure>`).join('');
+    }
+    const z = await api('/api/zips').catch(() => null);
+    if (z) $('zips').innerHTML = z.zips.length
+      ? z.zips.map(x => `<a href="/api/download/${x.name}" download>
+          <span>${x.name}</span><em>${x.size_mb} MB</em></a>`).join('')
+      : '<div class="empty">No archives yet.</div>';
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

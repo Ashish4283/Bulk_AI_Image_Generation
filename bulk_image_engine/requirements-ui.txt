@@ -1,0 +1,7 @@
+# Optional web UI only. The CLI needs nothing from this file.
+#   pip install -r requirements-ui.txt
+#   python app.py
+
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0

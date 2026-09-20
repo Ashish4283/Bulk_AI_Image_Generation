@@ -307,6 +307,23 @@ class BulkImageEngine:
         stopped: str | None = None
         t_start = time.time()
 
+        # Load the model once, up front. If the environment is broken — torch
+        # missing, no CUDA, bad weights — fail now rather than repeating the
+        # same error once per prompt for the whole batch.
+        needed = [p for p in prompts
+                  if not (resume and is_valid_image(out_dir / f"{p.index}.jpg"))]
+        if needed:
+            try:
+                self.load()
+            except Exception as exc:                          # noqa: BLE001
+                print(f"\n[fatal] model could not be loaded: {exc}")
+                return {
+                    "total": total, "rendered": 0, "skipped": total - len(needed),
+                    "failed": 0, "failures": [{"index": None, "error": str(exc)}],
+                    "stopped": None, "fatal": str(exc),
+                    "seconds": round(time.time() - t_start, 1),
+                }
+
         with manifest_path.open("a", encoding="utf-8") as manifest:
             for position, p in enumerate(prompts, start=1):
                 target = out_dir / f"{p.index}.jpg"
@@ -359,7 +376,7 @@ class BulkImageEngine:
         return {
             "total": total, "rendered": rendered, "skipped": skipped,
             "failed": failed, "failures": failures, "stopped": stopped,
-            "seconds": round(time.time() - t_start, 1),
+            "fatal": None, "seconds": round(time.time() - t_start, 1),
         }
 
 
@@ -483,6 +500,10 @@ modes
             subset, out_dir, resume=not args.no_resume, batch_no=batch_no,
             stop_file=args.stop_file, stop_after=args.stop_after,
         )
+        if summary.get("fatal"):
+            print(f"[batch {batch_no}] aborted - nothing rendered")
+            return 1
+
         print(f"[batch {batch_no}] rendered={summary['rendered']} "
               f"skipped={summary['skipped']} failed={summary['failed']} "
               f"in {summary['seconds']}s")
